@@ -1,0 +1,62 @@
+<!--
+    프로세스 B (툴 허브) AndroidManifest.xml 발췌.
+    패키지: com.example.toolhub — /system/priv-app 배치 전제.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.toolhub">
+
+    <!--
+        B와 바인딩하려는 A 쪽이 반드시 가져야 하는 권한. ToolHubService의
+        android:permission으로 걸어 exported 서비스를 아무나 바인드하지
+        못하게 막는다. signature 수준으로 충분 — 체인 진위는 별도로 검증하므로
+        이 권한 자체가 신뢰 근거는 아니다(HANDOFF 1항: 서명 수준은 체인 진위와 무관).
+    -->
+    <permission
+        android:name="com.example.toolhub.permission.BIND_TOOLHUB"
+        android:protectionLevel="signature" />
+
+    <!--
+        BootCompletedReceiver가 부팅 직후 ToolHubService를 startService()로
+        깨워 플러그인 메타데이터를 미리 로드하기 위해 필요하다.
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!--
+        B는 권한 검사를 하지 않는다 — 체인만 조립해서 C에 넘겨줄 뿐이고,
+        권한 판단은 전부 C 쪽(ChainPermissionChecker + 델리게이트 실행 중
+        SecurityException)에서 끝난다. 그래서 B 자신은 GET_APP_OPS_STATS도,
+        플러그인이 쓰는 dangerous 권한을 미러링해서 들고 있을 필요도 없다.
+    -->
+
+    <application>
+
+        <!--
+            :hub 서브 프로세스에서 실행 — A, C와 별도 프로세스임을 명시.
+            exported=true여야 A가 bindService로 접근 가능하다. permission으로
+            보호하되, 실제 호출자 검증(체인 진위 + 권한)은 ToolHubService.execute()
+            내부 로직이 담당한다 — 이 매니페스트 permission은 1차 방어선일 뿐이다.
+        -->
+        <service
+            android:name=".ToolHubService"
+            android:process=":hub"
+            android:exported="true"
+            android:permission="com.example.toolhub.permission.BIND_TOOLHUB" />
+
+        <!--
+            시스템만 보낼 수 있는 브로드캐스트라 exported=true여도 안전하다.
+            :hub 프로세스에서 함께 떠서 바로 ToolHubService를 startService()
+            할 수 있게 한다 (다른 프로세스면 startService()의 Intent가 여전히
+            같은 앱의 :hub 프로세스를 향하므로 문제없지만, 굳이 프로세스를
+            나눌 이유가 없다).
+        -->
+        <receiver
+            android:name=".BootCompletedReceiver"
+            android:process=":hub"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>

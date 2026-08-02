@@ -1,0 +1,47 @@
+<!--
+    프로세스 C (플러그인) AndroidManifest.xml 발췌.
+    벤더별 패키지 — 서명키가 B와 다르다는 전제.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.vendor.sampleplugin">
+
+    <!--
+        provider 보호 권한. protectionLevel은 두 후보 중 하나:
+
+        - signatureOrSystem (= signature|privileged): 현재 값. 서명키가
+          다르므로 B는 priv-app 배치로만 통과한다 (HANDOFF 6항).
+        - signature|knownSigner + android:knownCerts: 전환 검토 중인 값.
+          서로 다른 서명키를 명시적으로 신뢰 목록에 올려 priv-app 배치
+          없이도 통과시킬 수 있다. 전환 시 아래 knownCerts 배열을 채운다.
+
+        어느 쪽이든 이 권한은 "누가 provider를 부를 수 있는가"만 결정한다.
+        체인 진위(isTrusted)와 링크별 실제 권한 보유 여부는 별개로
+        ChainPermissionChecker가 검사한다 — B는 권한 검사를 하지 않는다.
+    -->
+    <permission
+        android:name="com.example.toolhub.permission.BIND_PLUGIN"
+        android:protectionLevel="signatureOrSystem" />
+    <!--
+        전환 시:
+        <permission
+            android:name="com.example.toolhub.permission.BIND_PLUGIN"
+            android:protectionLevel="signature|knownSigner"
+            android:knownCerts="@array/toolhub_hub_known_certs" />
+    -->
+
+    <!-- 이 플러그인이 실제로 사용하는 dangerous 권한. HandlerPermission 애노테이션과
+         일치해야 한다 — 여기 없는 권한을 onPerformAction/onReversePerformAction에서
+         쓰면 런타임에 SecurityException. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
+    <application>
+
+        <provider
+            android:name="com.example.vendor.sampleplugin.SamplePluginContentProvider"
+            android:authorities="com.example.vendor.sampleplugin"
+            android:exported="true"
+            android:readPermission="com.example.toolhub.permission.BIND_PLUGIN"
+            android:writePermission="com.example.toolhub.permission.BIND_PLUGIN" />
+
+    </application>
+</manifest>
