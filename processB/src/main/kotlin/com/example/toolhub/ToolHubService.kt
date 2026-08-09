@@ -46,6 +46,7 @@ class ToolHubService : Service() {
 
     companion object {
         private const val TAG = "ToolHubService"
+        private const val PREFLIGHT_CACHE_TTL_MS = 10000L
     }
 
     private lateinit var handlerThread: HandlerThread
@@ -62,6 +63,14 @@ class ToolHubService : Service() {
      * 변경 시 PluginRegistry.onRefresh로 무효화된다.
      */
     private val metadataCache = ConcurrentHashMap<String, Bundle>()
+
+    /**
+     * preflight 결과 캐시: actionId -> (timestamp, result Bundle).
+     * A의 repeated preflight() 호출을 빠르게 처리하고, execute() 호출 시
+     * 동일 actionId는 캐시 결과로 재사용해 중복 검사를 방지한다.
+     * ~10초 TTL (PREFLIGHT_CACHE_TTL_MS).
+     */
+    private val preflightCache = ConcurrentHashMap<String, Pair<Long, Bundle>>()
 
     override fun onCreate() {
         super.onCreate()
@@ -156,6 +165,35 @@ class ToolHubService : Service() {
                 putString(ResultContract.KEY_ACTION_NAME, actionName)
             })
         }
+
+        /**
+         * 사전 권한 진단 — execute() 호출 전에 A가 선택적으로 호출.
+         * 반환값: null 또는 success → 실행 가능
+         *        denied Bundle (PHASE_HUB_PREFLIGHT) → 권한/AppOps 문제
+         * 결과는 ~10초 캐싱되므로 A의 repeated 호출은 매우 빠르다.
+         * execute()에서도 동일 actionId는 캐시 재사용으로 중복 검사 방지.
+         */
+        override fun preflight(actionId: String): Bundle {
+            val cached = getValidCachedPreflight(actionId)
+            if (cached != null) {
+                return cached
+            }
+
+            val (authority, actionName) = splitActionId(actionId)
+                ?: return ResultContract.error("malformed actionId: $actionId")
+            val providerInfo = packageManager.resolveContentProvider(authority, 0)
+            if (providerInfo == null) {
+                return ResultContract.error("no plugin found for authority '$authority'")
+            }
+
+            // B 자신의 속성소스로 preflight 실행 (chained = B만, A 아님)
+            val preflightDenial = preflight(authority, actionName, attributionSource)
+            val result = preflightDenial ?: ResultContract.success(Bundle())
+
+            // 결과 캐싱
+            preflightCache[actionId] = System.currentTimeMillis() to result
+            return result
+        }
     }
 
     /**
@@ -222,6 +260,14 @@ class ToolHubService : Service() {
                 entry.requestId,
                 ResultContract.error("no plugin found for authority '$authority'")
             )
+            return
+        }
+
+        // 캐시된 preflight 결과 확인 — execute() 호출 전 A가 preflight()를 했으면
+        // 여기서 재사용 (중복 검사 방지).
+        val cachedPreflight = getValidCachedPreflight(entry.actionId)
+        if (cachedPreflight != null && cachedPreflight.getString(ResultContract.KEY_STATUS) != ResultContract.STATUS_SUCCESS) {
+            requestRegistry.complete(entry.requestId, cachedPreflight)
             return
         }
 
@@ -329,6 +375,15 @@ class ToolHubService : Service() {
             Log.w(TAG, "describe fetch failed for $authority: ${e.message}")
             null
         }
+    }
+
+    private fun getValidCachedPreflight(actionId: String): Bundle? {
+        val (timestamp, result) = preflightCache[actionId] ?: return null
+        if (System.currentTimeMillis() - timestamp > PREFLIGHT_CACHE_TTL_MS) {
+            preflightCache.remove(actionId)
+            return null
+        }
+        return result
     }
 
     private fun callPlugin(authority: String, actionName: String, entry: RequestRegistry.Entry): Bundle {

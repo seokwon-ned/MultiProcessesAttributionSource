@@ -18,6 +18,15 @@ public interface IToolHub extends IInterface {
      */
     Bundle describe(String actionId) throws android.os.RemoteException;
 
+    /**
+     * 사전 권한 진단 — A가 execute() 호출 전에 "지금 실행 가능한가?" 미리 확인.
+     * null 반환 = 실행 가능 (또는 정보 부족)
+     * denied Bundle 반환 = grant 또는 AppOps 문제 (PHASE_HUB_PREFLIGHT)
+     * 결과는 B에서 ~10초 캐싱하므로 repeat 호출은 빠르다. execute()에서도
+     * 동일 로직이 재실행되므로 보안 문제 없음 (캐시 사용으로 중복 방지).
+     */
+    Bundle preflight(String actionId) throws android.os.RemoteException;
+
     abstract class Stub extends android.os.Binder implements IToolHub {
         public static IToolHub asInterface(android.os.IBinder obj) {
             if (obj == null) return null;
@@ -61,6 +70,13 @@ public interface IToolHub extends IInterface {
                     Bundle metadata = describe(describeActionId);
                     reply.writeNoException();
                     reply.writeBundle(metadata);
+                    return true;
+                case 4: // preflight
+                    data.enforceInterface("com.example.toolhub.IToolHub");
+                    String preflightActionId = data.readString();
+                    Bundle preflightResult = preflight(preflightActionId);
+                    reply.writeNoException();
+                    reply.writeBundle(preflightResult);
                     return true;
             }
             return super.onTransact(code, data, reply, flags);
@@ -123,6 +139,22 @@ public interface IToolHub extends IInterface {
                     data.writeInterfaceToken("com.example.toolhub.IToolHub");
                     data.writeString(actionId);
                     mRemote.transact(3, data, reply, 0);
+                    reply.readException();
+                    return reply.readBundle();
+                } finally {
+                    reply.recycle();
+                    data.recycle();
+                }
+            }
+
+            @Override
+            public Bundle preflight(String actionId) throws android.os.RemoteException {
+                android.os.Parcel data = android.os.Parcel.obtain();
+                android.os.Parcel reply = android.os.Parcel.obtain();
+                try {
+                    data.writeInterfaceToken("com.example.toolhub.IToolHub");
+                    data.writeString(actionId);
+                    mRemote.transact(4, data, reply, 0);
                     reply.readException();
                     return reply.readBundle();
                 } finally {
