@@ -1,10 +1,9 @@
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
-    namespace = "com.example.toolhub"
+    namespace = "com.example.toolhub.plugin"
     compileSdk = 34
 
     defaultConfig {
@@ -15,8 +14,8 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+}
 
-    kotlinOptions {
-        jvmTarget = "11"
-    }
+dependencies {
+    implementation(project(":aidl"))
 }

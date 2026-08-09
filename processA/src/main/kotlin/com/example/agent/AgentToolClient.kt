@@ -111,6 +111,80 @@ class AgentToolClient(private val context: Context) {
     }
 
     /**
+     * 실행 전 사전검사용 메타데이터 조회 (DESIGN.md 4장). 반환 payload:
+     * KEY_PERMISSION_ENTRIES(권한별 분류/C·B grant 스냅샷), KEY_CONSENT_*.
+     * A 자신의 grant는 missingSelfPermissions()로 로컬 확인하면 세 링크의
+     * 사전 그림이 완성된다.
+     */
+    fun describeAction(actionId: String): Bundle? = try {
+        hub?.describe(actionId)
+    } catch (e: Exception) {
+        Log.e(TAG, "describe failed", e)
+        null
+    }
+
+    /**
+     * describe 결과에서 A 자신이 아직 grant받지 못한 권한 목록을 뽑는다.
+     * 체인 검사는 모든 링크가 모든 권한을 가져야 하므로, 목록 전체가 곧
+     * A가 보유해야 할 권한 목록이다 — 이걸로 requestPermissions()를 띄운다.
+     */
+    fun missingSelfPermissions(describeResult: Bundle): List<String> {
+        val payload = describeResult.getBundle(ResultContract.KEY_PAYLOAD) ?: return emptyList()
+        val entries = payload.getParcelableArrayList(
+            ResultContract.KEY_PERMISSION_ENTRIES, Bundle::class.java
+        ) ?: return emptyList()
+        return entries.mapNotNull { it.getString(ResultContract.KEY_PERM_NAME) }
+            .filter {
+                context.checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+    }
+
+    /**
+     * describe 결과에서 C(플러그인) 쪽에 grant가 빠진 런타임 권한 목록.
+     * 비어있지 않으면 pluginPermissionIntent()로 C의 권한 요청 Activity를
+     * startActivityForResult로 띄워 복구한다.
+     */
+    fun missingPluginPermissions(describeResult: Bundle): List<String> {
+        val payload = describeResult.getBundle(ResultContract.KEY_PAYLOAD) ?: return emptyList()
+        val entries = payload.getParcelableArrayList(
+            ResultContract.KEY_PERMISSION_ENTRIES, Bundle::class.java
+        ) ?: return emptyList()
+        return entries.filter {
+            it.getBoolean(ResultContract.KEY_PERM_IS_RUNTIME) &&
+                !it.getBoolean(ResultContract.KEY_PERM_GRANTED_ON_PLUGIN)
+        }.mapNotNull { it.getString(ResultContract.KEY_PERM_NAME) }
+    }
+
+    /** describe 결과 기준, 실행 전에 사용자 동의 UI가 필요한가. */
+    fun consentRequired(describeResult: Bundle): Boolean =
+        describeResult.getBundle(ResultContract.KEY_PAYLOAD)
+            ?.getBoolean(ResultContract.KEY_CONSENT_REQUIRED) == true
+
+    /**
+     * C의 동의 Activity(ConsentRequestActivity)를 띄우는 인텐트.
+     * 반드시 startActivityForResult로 실행해야 한다 — C가 승인 주체를
+     * getCallingPackage()로 확인하므로 A는 자기 승인만 얻을 수 있다.
+     * RESULT_OK 후 execute를 재시도하면 U층을 통과한다.
+     */
+    fun consentIntent(pluginPackage: String, actionName: String, categories: Array<String>?): Intent =
+        Intent().apply {
+            setClassName(pluginPackage, "com.example.toolhub.plugin.permission.ConsentRequestActivity")
+            putExtra("com.example.toolhub.plugin.EXTRA_ACTION_NAME", actionName)
+            putExtra("com.example.toolhub.plugin.EXTRA_CATEGORIES", categories)
+        }
+
+    /**
+     * C의 런타임 권한 요청 Activity(PluginPermissionActivity)를 띄우는 인텐트.
+     * deniedAt == 플러그인 && type == runtime 실패나
+     * missingPluginPermissions() 결과가 있을 때 startActivityForResult로 실행.
+     */
+    fun pluginPermissionIntent(pluginPackage: String, permissions: Array<String>): Intent =
+        Intent().apply {
+            setClassName(pluginPackage, "com.example.toolhub.plugin.permission.PluginPermissionActivity")
+            putExtra("com.example.toolhub.plugin.EXTRA_PERMISSIONS", permissions)
+        }
+
+    /**
      * Example of how to interpret a result.
      *
      * Even a permission denial demands completely different handling depending
@@ -129,13 +203,23 @@ class AgentToolClient(private val context: Context) {
             "허브/플러그인 버전 호환 문제 (사용자가 할 수 있는 게 없음, 업데이트 필요): " +
                 result.getString(ResultContract.KEY_MESSAGE)
 
+        ResultContract.STATUS_CONSENT_REQUIRED ->
+            "사용자 동의 필요 — consentIntent()로 플러그인의 동의 UI를 띄운 뒤 재시도: " +
+                "${result.getString(ResultContract.KEY_ACTION_NAME)}"
+
+        ResultContract.STATUS_UNAUTHORIZED ->
+            "인가 거부 (전송 경로 또는 벤더 정책): ${result.getString(ResultContract.KEY_MESSAGE)}"
+
         ResultContract.STATUS_PERMISSION_DENIED -> {
             val perm = result.getString(ResultContract.KEY_PERMISSION)
             val at = result.getString(ResultContract.KEY_DENIED_AT)
-            if (ResultContract.isActionableByCaller(result, context.packageName)) {
-                "권한 요청 필요: $perm"
-            } else {
-                "$at 가 $perm 권한을 보유하지 않음 (배포 구성 문제)"
+            when (ResultContract.recoveryAction(result, context.packageName)) {
+                ResultContract.RECOVERY_REQUEST_SELF_PERMISSION ->
+                    "내 런타임 권한 요청 필요: $perm"
+                ResultContract.RECOVERY_REQUEST_PLUGIN_PERMISSION ->
+                    "플러그인($at)의 런타임 권한 획득 필요 — pluginPermissionIntent() 실행: $perm"
+                else ->
+                    "$at 가 $perm 권한을 보유하지 않음 (배포 구성 문제)"
             }
         }
 

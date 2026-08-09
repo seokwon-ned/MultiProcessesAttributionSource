@@ -1,9 +1,12 @@
 package com.example.toolhub
 
+import android.app.AppOpsManager
 import android.app.Service
 import android.content.AttributionSource
 import android.content.ContextParams
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.PermissionInfo
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -15,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 프로세스 B의 진입점. AIDL 구현 + 바인더 스레드 검증 + 체인 조립 +
- * 핸들러 스레드 디스패치를 담당한다.
+ * 핸들러 스레드 디스패치 + advisory preflight를 담당한다 (DESIGN.md 6장).
  *
  * execute()는 바인더 스레드에서 다음만 하고 즉시 반환한다:
  *  1. callerSource.enforceCallingUid()  — 머리가 진짜 호출자인가
@@ -27,12 +30,17 @@ import java.util.concurrent.ConcurrentHashMap
  * 1, 2는 핸들러 스레드로 넘어가면 Binder.getCallingUid()가 사라지므로 반드시
  * 바인더 스레드에서 끝내야 한다.
  *
- * B는 권한 검사를 하지 않는다. 체인만 진짜로 조립해서 그대로 C에 전달할 뿐이고,
- * "이 액션에 실제로 필요한 권한이 뭔지, 체인의 각 링크가 그걸 갖고 있는지"는
- * C가 자기 자신의 attributionContext로 스스로 판단한다
- * (PluginContentProvider -> ChainPermissionChecker / 델리게이트 실행 중
- * SecurityException). B가 C에 __required_permissions를 물어보던 캐싱 로직도
- * 제거했다 — B의 역할을 "체인을 조립해서 넘겨주는 라우터"로 최소화하기 위함.
+ * B의 권한 검사는 advisory다 — 최종 판단은 항상 C의 인가 파이프라인
+ * (T∧P∧U∧V)이 한다. B가 여기서 하는 것:
+ *  - describe 릴레이/캐시: C의 메타데이터를 해석 없이 A에 전달하고 캐싱
+ *  - preflight(fail-fast): 캐시된 권한 목록으로 링크별 grant + A의 AppOps
+ *    상태(GET_APP_OPS_STATS 필요 — "이번만 허용" 만료 등, B만 볼 수 있다)를
+ *    사전 확인해 거부될 호출이 C 프로세스를 깨우는 비용을 없앤다.
+ *    거부는 PHASE_HUB_PREFLIGHT로 구분 보고. 캐시가 낡아 잘못 통과시켜도
+ *    C가 재검증하므로 보안 구멍이 아니다.
+ *  - executeAsHub: B 자신이 1차 소비자로 C의 툴을 쓰는 경로 (모드 2 —
+ *    체인 C->B, next 없음). B manifest는 이 때문에도(그리고 체인 링크로서
+ *    OS 강제 때문에도) 플러그인 권한을 미러링해야 한다.
  */
 class ToolHubService : Service() {
 
@@ -48,12 +56,22 @@ class ToolHubService : Service() {
     /** 콜백 바인더당 한 번만 linkToDeath 하기 위한 추적 맵. */
     private val linkedDeaths = ConcurrentHashMap<IBinder, IBinder.DeathRecipient>()
 
+    /**
+     * describe 응답 캐시: authority -> KEY_ACTIONS Bundle (actionName -> 메타).
+     * 내용은 해석하지 않고 relay/preflight 입력으로만 쓴다. 플러그인 패키지
+     * 변경 시 PluginRegistry.onRefresh로 무효화된다.
+     */
+    private val metadataCache = ConcurrentHashMap<String, Bundle>()
+
     override fun onCreate() {
         super.onCreate()
         handlerThread = HandlerThread("ToolHubDispatch").apply { start() }
         handler = Handler(handlerThread.looper)
         requestRegistry = RequestRegistry(handler)
-        pluginRegistry = PluginRegistry(this, handler).apply { start() }
+        pluginRegistry = PluginRegistry(this, handler).apply {
+            onRefresh = { metadataCache.clear() }
+            start()
+        }
     }
 
     override fun onDestroy() {
@@ -121,6 +139,49 @@ class ToolHubService : Service() {
         override fun cancel(requestId: String) {
             requestRegistry.cancel(requestId)
         }
+
+        /**
+         * 메타데이터 relay — C의 describe 응답에서 해당 액션 부분만 그대로
+         * 돌려준다 (해석하지 않는다). 캐시 히트면 C를 깨우지 않는다.
+         * payload = { KEY_PERMISSION_ENTRIES, KEY_CONSENT_REQUIRED, ... }.
+         */
+        override fun describe(actionId: String): Bundle {
+            val (authority, actionName) = splitActionId(actionId)
+                ?: return ResultContract.error("malformed actionId: $actionId")
+            val actions = actionsMetadataFor(authority)
+                ?: return ResultContract.error("describe failed for authority '$authority'")
+            val action = actions.getBundle(actionName)
+                ?: return ResultContract.error("unknown action: $actionName")
+            return ResultContract.success(Bundle(action).apply {
+                putString(ResultContract.KEY_ACTION_NAME, actionName)
+            })
+        }
+    }
+
+    /**
+     * B 자신이 1차 소비자로 툴을 실행하는 경로 (모드 2 — DESIGN.md 2장).
+     * 체인 조립 없이 자기 attributionSource(next 없음)를 그대로 쓴다.
+     * C의 인가 파이프라인에서 originator는 B 자신이 되고, 특례 없이 동일한
+     * 규칙(권한/동의/정책)이 적용된다.
+     */
+    fun executeAsHub(
+        actionId: String,
+        args: Bundle,
+        reverse: Boolean = false,
+        onResult: ((Bundle) -> Unit)? = null
+    ): String? {
+        if (requestRegistry.isSaturated()) {
+            onResult?.invoke(ResultContract.error("too many in-flight requests"))
+            return null
+        }
+        val callback = onResult?.let { fn ->
+            object : IToolHubCallback.Stub() {
+                override fun onResult(requestId: String, result: Bundle) = fn(result)
+            }
+        }
+        val entry = requestRegistry.register(actionId, args, reverse, attributionSource, callback)
+        handler.post { dispatch(entry) }
+        return entry.requestId
     }
 
     private fun linkCallbackDeath(callback: IToolHubCallback, callerUid: Int) {
@@ -142,9 +203,9 @@ class ToolHubService : Service() {
     }
 
     /**
-     * 핸들러 스레드에서 실행. 여기선 actionId를 쪼개고 provider가 실제로
-     * 존재하는지만 확인한다(discovery) — 권한 검사는 하지 않는다. C가 스스로
-     * 판단해서 돌려준 결과를 그대로 A에 전달할 뿐이다.
+     * 핸들러 스레드에서 실행. actionId를 쪼개고 provider 존재 확인(discovery)
+     * 후, advisory preflight로 거부될 호출을 미리 끊는다. 통과하면 C를 부르고
+     * C가 돌려준 결과를 그대로 A에 전달한다 — 최종 판단은 항상 C.
      */
     private fun dispatch(entry: RequestRegistry.Entry) {
         val (authority, actionName) = splitActionId(entry.actionId) ?: run {
@@ -164,8 +225,110 @@ class ToolHubService : Service() {
             return
         }
 
+        val preflightDenial = preflight(authority, actionName, entry.chainedSource)
+        if (preflightDenial != null) {
+            requestRegistry.complete(entry.requestId, preflightDenial)
+            return
+        }
+
         val result = callPlugin(authority, actionName, entry)
         requestRegistry.complete(entry.requestId, result)
+    }
+
+    /**
+     * advisory preflight (DESIGN.md 6.2). 캐시된 메타데이터의 권한 목록으로:
+     *  1. 체인 각 링크(B 자신 + A)의 grant를 확인 — 거부될 호출이 C 프로세스를
+     *     깨우는 콜드스타트 비용을 없앤다.
+     *  2. A의 AppOps 상태를 확인 — "이번만 허용" 만료, MODE_IGNORED는 grant로는
+     *     안 보이고 GET_APP_OPS_STATS(signature|privileged)를 가진 B만 볼 수 있다.
+     *     C는 이 검사를 할 수 없다 (C의 grant 검사와 겹치지 않는 유일 가치).
+     * 어디까지나 advisory — 메타데이터가 없거나 낡았으면 그냥 통과시키고 C의
+     * 재검증에 맡긴다. 거부는 PHASE_HUB_PREFLIGHT로 구분 보고한다.
+     */
+    private fun preflight(authority: String, actionName: String, chained: AttributionSource): Bundle? {
+        val meta = actionsMetadataFor(authority)?.getBundle(actionName) ?: return null
+        val entries = meta.getParcelableArrayList(
+            ResultContract.KEY_PERMISSION_ENTRIES, Bundle::class.java
+        ) ?: return null
+
+        // 링크 목록: 머리(B 자신) + next(모드 1이면 A, 모드 2면 없음)
+        val links = buildList {
+            add(chained)
+            chained.next?.let { add(it) }
+        }
+
+        for (permEntry in entries) {
+            val permission = permEntry.getString(ResultContract.KEY_PERM_NAME) ?: continue
+            for (link in links) {
+                val pkg = link.packageName ?: continue
+                if (packageManager.checkPermission(permission, pkg) != PackageManager.PERMISSION_GRANTED) {
+                    return ResultContract.denied(
+                        permission, pkg, ResultContract.PHASE_HUB_PREFLIGHT,
+                        "grant missing (hub preflight)", permissionTypeOf(permission)
+                    )
+                }
+                if (appOpsBlocked(permission, link.uid, pkg)) {
+                    return ResultContract.denied(
+                        permission, pkg, ResultContract.PHASE_HUB_PREFLIGHT,
+                        "app-op not allowed (one-time grant expired or ignored)",
+                        ResultContract.PERMISSION_TYPE_RUNTIME
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * grant는 있지만 AppOps 모드가 실행을 막는 상태인가. MODE_DEFAULT는 grant
+     * 상태를 따르므로 통과로 본다. GET_APP_OPS_STATS가 없으면(비 priv 빌드)
+     * 조회가 거부되는데, advisory 검사이므로 조용히 통과시킨다.
+     */
+    private fun appOpsBlocked(permission: String, uid: Int, packageName: String): Boolean {
+        val op = AppOpsManager.permissionToOp(permission) ?: return false
+        return try {
+            val appOps = getSystemService(AppOpsManager::class.java)
+            val mode = appOps.unsafeCheckOpNoThrow(op, uid, packageName)
+            mode != AppOpsManager.MODE_ALLOWED && mode != AppOpsManager.MODE_DEFAULT
+        } catch (e: SecurityException) {
+            false
+        }
+    }
+
+    private fun permissionTypeOf(permission: String): String = try {
+        val info = packageManager.getPermissionInfo(permission, 0)
+        if (info.protection == PermissionInfo.PROTECTION_DANGEROUS) {
+            ResultContract.PERMISSION_TYPE_RUNTIME
+        } else {
+            ResultContract.PERMISSION_TYPE_INSTALL
+        }
+    } catch (e: PackageManager.NameNotFoundException) {
+        ResultContract.PERMISSION_TYPE_INSTALL
+    }
+
+    /**
+     * authority의 describe 응답(KEY_ACTIONS Bundle)을 캐시에서 얻거나, 없으면
+     * C provider를 호출해 채운다. 실패 시 null — 호출부는 preflight를 건너뛰고
+     * C의 재검증에 맡긴다.
+     */
+    private fun actionsMetadataFor(authority: String): Bundle? {
+        metadataCache[authority]?.let { return it }
+        return try {
+            val uri = Uri.parse("content://$authority")
+            val response = contentResolver.call(
+                uri, ResultContract.METHOD_DESCRIBE_ACTION, null, Bundle()
+            ) ?: return null
+            if (response.getString(ResultContract.KEY_STATUS) != ResultContract.STATUS_SUCCESS) {
+                return null
+            }
+            val actions = response.getBundle(ResultContract.KEY_PAYLOAD)
+                ?.getBundle(ResultContract.KEY_ACTIONS) ?: return null
+            metadataCache[authority] = actions
+            actions
+        } catch (e: Exception) {
+            Log.w(TAG, "describe fetch failed for $authority: ${e.message}")
+            null
+        }
     }
 
     private fun callPlugin(authority: String, actionName: String, entry: RequestRegistry.Entry): Bundle {

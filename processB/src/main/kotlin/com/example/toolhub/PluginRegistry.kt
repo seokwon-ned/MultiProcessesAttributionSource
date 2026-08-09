@@ -53,6 +53,15 @@ class PluginRegistry(private val context: Context, private val handler: Handler)
 
     private val cache = ConcurrentHashMap<String, PluginInfo>() // authority -> info
 
+    /**
+     * refreshAll() 완료 시 호출 — ToolHubService가 메타데이터 캐시(describe
+     * 응답)를 무효화하는 데 쓴다. 플러그인 설치/갱신 시 stale 메타데이터로
+     * advisory preflight가 잘못 판단하는 것을 줄인다 (틀려도 C가 재검증하므로
+     * 보안 문제는 아니다 — DESIGN.md 6.2).
+     */
+    @Volatile
+    var onRefresh: (() -> Unit)? = null
+
     private val packageChangeReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             // handler 스레드에서 등록했으므로(start() 참고) 이 콜백 자체가
@@ -112,5 +121,7 @@ class PluginRegistry(private val context: Context, private val handler: Handler)
         for (provider in discovered) {
             cache[provider.authority] = PluginInfo(provider.authority, provider.packageName)
         }
+
+        onRefresh?.invoke()
     }
 }

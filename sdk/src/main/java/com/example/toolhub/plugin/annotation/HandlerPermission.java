@@ -1,4 +1,4 @@
-package com.example.toolhub.plugin;
+package com.example.toolhub.plugin.annotation;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

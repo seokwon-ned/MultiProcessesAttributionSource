@@ -28,6 +28,13 @@ object ResultContract {
     const val METHOD_PERFORM_ACTION = "onPerformAction"
     const val METHOD_REVERSE_PERFORM_ACTION = "onReversePerformAction"
 
+    /**
+     * 메타데이터 조회. arg = actionName (null이면 전체). 실행이 아니므로 체인
+     * 조립·권한 검사 없이 허브 핀 고정(T층 ①)만 적용된다. 응답 payload:
+     * KEY_ACTIONS -> { actionName -> { KEY_PERMISSION_ENTRIES, KEY_CONSENT_* } }
+     */
+    const val METHOD_DESCRIBE_ACTION = "describeAction"
+
     // status 값
     const val STATUS_SUCCESS = "success"
     const val STATUS_PERMISSION_DENIED = "permission_denied"
@@ -45,12 +52,47 @@ object ResultContract {
     const val STATUS_PROTOCOL_INCOMPATIBLE = "protocol_incompatible"
     const val STATUS_ERROR = "error"
 
+    /**
+     * U층(사용자 인가) 거부 — 이 (에이전트, 액션) 조합에 대한 사용자 승인
+     * 레코드가 C의 ConsentStore에 없다. A는 C의 ConsentRequestActivity를 띄워
+     * 승인을 받은 뒤 재시도하면 된다 (recoveryAction == RECOVERY_REQUEST_CONSENT).
+     */
+    const val STATUS_CONSENT_REQUIRED = "consent_required"
+
+    /**
+     * T층(전송 경로) 또는 V층(벤더 정책) 거부. 권한 요청이나 동의로 복구되지
+     * 않는다 — 호출 경로 자체가 허용되지 않았거나 정책상 차단된 것.
+     */
+    const val STATUS_UNAUTHORIZED = "unauthorized"
+
     // phase 값 — A의 대응이 갈리는 지점이므로 반드시 구분해서 채운다.
-    // B는 권한 검사를 하지 않으므로 "hub_preflight" 단계는 없다 — 모든 권한
-    // 판단은 C 쪽(plugin_preflight, runtime)에서 일어난다.
     const val PHASE_CHAIN = "chain"            // 코드 버그. 권한 요청해도 소용없음
+    const val PHASE_HUB_PREFLIGHT = "hub_preflight"      // B의 advisory 사전 검사 (grant/AppOps)
     const val PHASE_PLUGIN_PREFLIGHT = "plugin_preflight"
     const val PHASE_RUNTIME = "runtime"        // AppOps 계열. 실행 중 발생
+
+    // 권한 분류 — 복구 경로가 갈린다: runtime이면 해당 링크가 grant를 받으면
+    // 되고(A는 자기 UI, C는 PluginPermissionActivity), install이면 배포 문제다.
+    const val PERMISSION_TYPE_RUNTIME = "runtime"
+    const val PERMISSION_TYPE_INSTALL = "install"
+    const val KEY_PERMISSION_TYPE = "permission_type"
+
+    // describe 응답 키
+    const val KEY_ACTIONS = "actions"                          // Bundle: actionName -> 액션 메타 Bundle
+    const val KEY_PERMISSION_ENTRIES = "permission_entries"    // ArrayList<Bundle>
+    const val KEY_PERM_NAME = "perm_name"
+    const val KEY_PERM_IS_RUNTIME = "perm_is_runtime"
+    const val KEY_PERM_GRANTED_ON_PLUGIN = "perm_granted_on_plugin"
+    const val KEY_PERM_GRANTED_ON_HUB = "perm_granted_on_hub"
+    const val KEY_CONSENT_REQUIRED = "consent_required"
+    const val KEY_CONSENT_CATEGORIES = "consent_categories"
+    const val KEY_ACTION_NAME = "action_name"
+
+    // recoveryAction() 반환값 — 실패 Bundle을 A의 UX 분기로 매핑한다.
+    const val RECOVERY_NONE = "none"
+    const val RECOVERY_REQUEST_SELF_PERMISSION = "request_self_permission"
+    const val RECOVERY_REQUEST_PLUGIN_PERMISSION = "request_plugin_permission"
+    const val RECOVERY_REQUEST_CONSENT = "request_consent"
 
     // 이 object의 함수들은 C 쪽 Java 코드(ChainPermissionChecker,
     // PluginContentProvider)에서도 정적 호출 문법(ResultContract.foo(...))으로
@@ -70,13 +112,28 @@ object ResultContract {
         permission: String?,
         deniedAt: String?,
         phase: String,
-        message: String? = null
+        message: String? = null,
+        permissionType: String? = null
     ): Bundle = Bundle().apply {
         putString(KEY_STATUS, STATUS_PERMISSION_DENIED)
         putString(KEY_PERMISSION, permission)
         putString(KEY_DENIED_AT, deniedAt)
         putString(KEY_PHASE, phase)
         message?.let { putString(KEY_MESSAGE, it) }
+        permissionType?.let { putString(KEY_PERMISSION_TYPE, it) }
+    }
+
+    @JvmStatic
+    fun consentRequired(actionName: String, categories: Array<String>): Bundle = Bundle().apply {
+        putString(KEY_STATUS, STATUS_CONSENT_REQUIRED)
+        putString(KEY_ACTION_NAME, actionName)
+        putStringArray(KEY_CONSENT_CATEGORIES, categories)
+    }
+
+    @JvmStatic
+    fun unauthorized(message: String): Bundle = Bundle().apply {
+        putString(KEY_STATUS, STATUS_UNAUTHORIZED)
+        putString(KEY_MESSAGE, message)
     }
 
     @JvmStatic
@@ -109,4 +166,31 @@ object ResultContract {
         result.getString(KEY_STATUS) == STATUS_PERMISSION_DENIED &&
             result.getString(KEY_PHASE) != PHASE_CHAIN &&
             result.getString(KEY_DENIED_AT) == callerPackage
+
+    /**
+     * 실패 결과를 A의 복구 UX 분기로 매핑한다.
+     *
+     * - RECOVERY_REQUEST_CONSENT: C의 ConsentRequestActivity를 띄워 승인 후 재시도.
+     * - RECOVERY_REQUEST_SELF_PERMISSION: A 자신의 런타임 권한 요청 UI.
+     * - RECOVERY_REQUEST_PLUGIN_PERMISSION: deniedAt 패키지(플러그인)의
+     *   PluginPermissionActivity를 띄워 C의 런타임 권한 획득 후 재시도.
+     * - RECOVERY_NONE: 배포/코드 문제 — 사용자 조치로 복구 불가, 안내만.
+     */
+    @JvmStatic
+    fun recoveryAction(result: Bundle, callerPackage: String): String {
+        return when (result.getString(KEY_STATUS)) {
+            STATUS_CONSENT_REQUIRED -> RECOVERY_REQUEST_CONSENT
+            STATUS_PERMISSION_DENIED -> {
+                if (result.getString(KEY_PHASE) == PHASE_CHAIN) return RECOVERY_NONE
+                val deniedAt = result.getString(KEY_DENIED_AT)
+                val isRuntime = result.getString(KEY_PERMISSION_TYPE) == PERMISSION_TYPE_RUNTIME
+                when {
+                    deniedAt == callerPackage && isRuntime -> RECOVERY_REQUEST_SELF_PERMISSION
+                    deniedAt != null && isRuntime -> RECOVERY_REQUEST_PLUGIN_PERMISSION
+                    else -> RECOVERY_NONE
+                }
+            }
+            else -> RECOVERY_NONE
+        }
+    }
 }

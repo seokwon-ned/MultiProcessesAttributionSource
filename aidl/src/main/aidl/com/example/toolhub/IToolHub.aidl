@@ -38,3 +38,6 @@ interface IToolHub {
      */
     void cancel(String requestId);
 }
+// NOTE: describe(String actionId): Bundle 이 추가되었다 (transaction 3).
+// AIDL codegen을 쓰지 않으므로(hand-written stub) 이 파일은 계약 문서 역할만
+// 한다 — 실제 구현은 processA/processB의 IToolHub.java 참고.

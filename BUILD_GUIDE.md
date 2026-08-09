@@ -9,9 +9,10 @@
 | 모듈 | 타입 | 패키지 | 용도 |
 |------|------|---------|------|
 | `:aidl` | Library | com.example.toolhub | AIDL 인터페이스 (IToolHub, IToolHubCallback) |
+| `:sdk` | Library | com.example.toolhub.plugin | 플러그인 SDK (ToolHandler, HandlerPermission, ParameterValues, PermissionScanner, ChainPermissionChecker) |
 | `:processA` | Application | com.example.agent | Agent app (AIDL 클라이언트) |
 | `:processB` | Application | com.example.toolhub | ToolHub 서비스 (/system/priv-app 배치) |
-| `:processC` | Application | com.example.vendor.sampleplugin | 플러그인 (ContentProvider) |
+| `:processC` | Application | com.example.vendor.sampleplugin | 플러그인 (ContentProvider), `:sdk` 사용 |
 
 ## 빌드 명령어
 

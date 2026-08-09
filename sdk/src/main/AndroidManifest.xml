@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+            둘 다 A(일반 앱)가 startActivityForResult로 띄우므로 exported.
+            - ConsentRequestActivity: 승인 주체를 getCallingPackage()로 얻으므로
+              A는 자기 자신에 대한 승인만 얻을 수 있다.
+            - PluginPermissionActivity: requestPermissions()는 이 앱 자신의
+              manifest 선언 권한만 요청 가능하므로 exported여도 안전하다.
+        -->
+        <activity
+            android:name="com.example.toolhub.plugin.permission.ConsentRequestActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.Dialog" />
+
+        <activity
+            android:name="com.example.toolhub.plugin.permission.PluginPermissionActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+    </application>
+
+</manifest>
