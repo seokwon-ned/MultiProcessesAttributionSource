@@ -11,6 +11,18 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Process B의 권한 사전검사 담당 (advisory, C를 깨우지 않음).
  * Layer 2 (grant) + AppOps 상태 빠른 진단 및 캐싱.
+ *
+ * A의 AppOps 확인이 중요한 이유:
+ * checkPermission()은 grant 상태(PERMISSION_GRANTED/DENIED)만 반영하지만,
+ * 사용자는 [설정 → 앱 권한]에서:
+ *  - "이번만 허용" → 타임아웃 후 MODE_IGNORED (expire됨)
+ *  - "항상 거부" → MODE_IGNORED (영구)
+ *  - [특별한 앱 권한 세부설정] → MODE_FOREGROUND_ONLY 등
+ * 이런 상태를 checkPermission()은 못 본다 (grant로 보임).
+ *
+ * B가 GET_APP_OPS_STATS (signature privilege)를 가진 유일한 검사자이므로,
+ * C에서 못 보는 "거부될 호출"을 B가 미리 감지해 C 깨우는 비용을 아낀다.
+ * 예: checkPermission() ✓ 이지만 execute()는 SecurityException.
  */
 class AuthorizationPreChecker(
     private val packageManager: PackageManager,
