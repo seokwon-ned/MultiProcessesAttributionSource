@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.vendor.sampleplugin">
+
+    <!--
+        Process C (Plugin) — Vendor-specific package with separate signing key.
+
+        Provider protection: currently using signatureOrSystem (= signature|privileged).
+        Process B reaches this provider only if deployed as /system/priv-app.
+        Future: transition to signature|knownSigner + android:knownCerts to permit
+        B's independent signing without requiring privileged deployment.
+    -->
+    <permission
+        android:name="com.example.toolhub.permission.BIND_PLUGIN"
+        android:protectionLevel="signatureOrSystem" />
+
+    <!--
+        Example dangerous permissions used by plugin delegates.
+        Actual permissions declared here must match @HandlerPermission annotations
+        on onPerformAction and onReversePerformAction methods.
+    -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ToolHub">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Plugin content provider exposed to Process B.
+            readPermission/writePermission = BIND_PLUGIN guards access.
+            Permission check is first-line defense; actual chain validation
+            (isTrusted) and permission enforcement are handled inside call().
+        -->
+        <provider
+            android:name="com.example.vendor.sampleplugin.PluginContentProvider"
+            android:authorities="com.example.vendor.sampleplugin"
+            android:exported="true"
+            android:readPermission="com.example.toolhub.permission.BIND_PLUGIN"
+            android:writePermission="com.example.toolhub.permission.BIND_PLUGIN" />
+
+    </application>
+
+</manifest>

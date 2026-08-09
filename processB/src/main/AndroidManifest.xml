@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.toolhub">
+
+    <!--
+        Process B (ToolHub) — Platform signed, /system/priv-app deployment assumed.
+
+        B acts as a pure router: assembles the attribution chain and forwards to C.
+        No permission checking is performed here — that's entirely C's responsibility.
+    -->
+    <permission
+        android:name="com.example.toolhub.permission.BIND_TOOLHUB"
+        android:protectionLevel="signature" />
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ToolHub">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            ToolHub service runs in :hub subprocess to isolate it from the main process.
+            exported=true is necessary for Process A to bindService().
+            Permission check provides first-line defense, but actual caller verification
+            (chain authenticity + permissions) is enforced inside execute() logic.
+        -->
+        <service
+            android:name=".ToolHubService"
+            android:process=":hub"
+            android:exported="true"
+            android:permission="com.example.toolhub.permission.BIND_TOOLHUB" />
+
+        <!--
+            Boot receiver to awaken ToolHubService and preload plugin metadata.
+            Runs in same :hub subprocess for efficiency.
+            BOOT_COMPLETED is system-only broadcast, safe with exported=true.
+        -->
+        <receiver
+            android:name=".BootCompletedReceiver"
+            android:process=":hub"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>
