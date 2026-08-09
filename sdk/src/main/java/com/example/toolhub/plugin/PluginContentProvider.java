@@ -224,8 +224,20 @@ public abstract class PluginContentProvider extends ContentProvider {
         ActionMetadata meta = metadata().get(actionName);
         String[] required = meta != null ? meta.permissions : new String[0];
 
-        // P층 Layer 0 + Layer 2 — 체인 진위와 전 링크 grant.
-        Bundle chainDenial = ChainPermissionChecker.check(getContext(), chainedSource, required);
+        // P층 Layer 0 — 체인 신뢰 여부(시스템 등록 확인)
+        if (!chainedSource.isTrusted(getContext())) {
+            return ResultContract.untrustedChain(
+                    "attribution chain is not registered with the system (isTrusted() == false)");
+        }
+
+        // P층 Layer 2-1 — C 자신의 permission 확인
+        Bundle pluginDenial = ChainPermissionChecker.checkPluginPermissions(getContext(), required);
+        if (pluginDenial != null) {
+            return pluginDenial;
+        }
+
+        // P층 Layer 2-2 — 체인(originator: B/A)의 permission 확인
+        Bundle chainDenial = ChainPermissionChecker.checkChainLinks(getContext(), chainedSource, required);
         if (chainDenial != null) {
             return chainDenial;
         }

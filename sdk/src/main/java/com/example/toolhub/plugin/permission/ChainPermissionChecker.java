@@ -66,6 +66,58 @@ public final class ChainPermissionChecker {
         return null;
     }
 
+    /**
+     * C(플러그인) 자신의 permission만 확인. 체인(originator)의 permission과는 별개다.
+     * @param context               C 프로세스의 Context
+     * @param requiredPermissions   이 액션에 필요한 권한 목록
+     * @return null이면 통과. 아니면 ResultContract 형식의 거부 Bundle.
+     */
+    public static Bundle checkPluginPermissions(Context context, String[] requiredPermissions) {
+        PackageManager pm = context.getPackageManager();
+        String selfPackage = context.getPackageName();
+
+        for (String permission : requiredPermissions) {
+            if (pm.checkPermission(permission, selfPackage) != PackageManager.PERMISSION_GRANTED) {
+                return ResultContract.denied(
+                        permission,
+                        selfPackage,
+                        ResultContract.PHASE_PLUGIN_PREFLIGHT,
+                        "grant missing on plugin itself",
+                        permissionType(pm, permission));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 체인(originator)의 permission만 확인. C 자신의 permission은 checkPluginPermissions()로 별도 검증.
+     * @param context               C 프로세스의 Context
+     * @param chainedSource         C가 createContext(...)로 조립한 자신의 attributionSource
+     * @param requiredPermissions   이 액션에 필요한 권한 목록
+     * @return null이면 통과. 아니면 ResultContract 형식의 거부 Bundle.
+     */
+    public static Bundle checkChainLinks(Context context, AttributionSource chainedSource,
+                                          String[] requiredPermissions) {
+        PackageManager pm = context.getPackageManager();
+
+        for (String permission : requiredPermissions) {
+            AttributionSource link = chainedSource.getNext(); // C 제외, B부터 시작
+            while (link != null) {
+                if (pm.checkPermission(permission, link.getPackageName())
+                        != PackageManager.PERMISSION_GRANTED) {
+                    return ResultContract.denied(
+                            permission,
+                            link.getPackageName(),
+                            ResultContract.PHASE_PLUGIN_PREFLIGHT,
+                            "grant missing on chain link " + link.getPackageName(),
+                            permissionType(pm, permission));
+                }
+                link = link.getNext();
+            }
+        }
+        return null;
+    }
+
     /** dangerous(런타임) 권한이면 runtime, 그 외/조회 실패는 install로 분류. */
     public static String permissionType(PackageManager pm, String permission) {
         try {
