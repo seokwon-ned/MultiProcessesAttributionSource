@@ -111,6 +111,31 @@ class AgentToolClient(private val context: Context) {
     }
 
     /**
+     * 사전 권한 진단 (DESIGN.md 7장, PREFLIGHT.md 참고). B가 AppOps 상태와
+     * 권한 grant를 빠르게 판단 (C 안 깨움, ~10초 캐시).
+     *
+     * 반환값: null 또는 success → OK / denied Bundle → 거부 (PHASE_HUB_PREFLIGHT)
+     *
+     * A가 execute() 전에 호출해서 "지금 실행 가능한가?" 미리 판단 가능.
+     * 예: preflight()가 거부하면 권한 요청 후 execute() 재시도.
+     */
+    fun preflight(actionId: String): Bundle? = try {
+        hub?.preflight(actionId)
+    } catch (e: Exception) {
+        Log.e(TAG, "preflight failed", e)
+        null
+    }
+
+    /**
+     * preflight 결과가 통과했는가 (또는 정보 부족).
+     * true면 execute() 호출 가능성 높음.
+     */
+    fun preflightOk(preflightResult: Bundle?): Boolean {
+        if (preflightResult == null) return true  // 정보 부족, 통과로 봄
+        return preflightResult.getString(ResultContract.KEY_STATUS) == ResultContract.STATUS_SUCCESS
+    }
+
+    /**
      * 실행 전 사전검사용 메타데이터 조회 (DESIGN.md 4장). 반환 payload:
      * KEY_PERMISSION_ENTRIES(권한별 분류/C·B grant 스냅샷), KEY_CONSENT_*.
      * A 자신의 grant는 missingSelfPermissions()로 로컬 확인하면 세 링크의
@@ -213,13 +238,27 @@ class AgentToolClient(private val context: Context) {
         ResultContract.STATUS_PERMISSION_DENIED -> {
             val perm = result.getString(ResultContract.KEY_PERMISSION)
             val at = result.getString(ResultContract.KEY_DENIED_AT)
-            when (ResultContract.recoveryAction(result, context.packageName)) {
-                ResultContract.RECOVERY_REQUEST_SELF_PERMISSION ->
-                    "내 런타임 권한 요청 필요: $perm"
-                ResultContract.RECOVERY_REQUEST_PLUGIN_PERMISSION ->
-                    "플러그인($at)의 런타임 권한 획득 필요 — pluginPermissionIntent() 실행: $perm"
-                else ->
-                    "$at 가 $perm 권한을 보유하지 않음 (배포 구성 문제)"
+            val phase = result.getString(ResultContract.KEY_PHASE)
+
+            // preflight에서 거부된 경우 (PHASE_HUB_PREFLIGHT)
+            if (phase == ResultContract.PHASE_HUB_PREFLIGHT) {
+                val permType = result.getString(ResultContract.KEY_PERMISSION_TYPE)
+                if (permType == ResultContract.PERMISSION_TYPE_RUNTIME) {
+                    "허브의 사전 진단: $at 의 $perm 권한 또는 AppOps 문제. " +
+                        "권한 설정 확인 또는 재시도"
+                } else {
+                    "허브의 사전 진단: $at 이(가) $perm 권한을 보유하지 않음 (배포 문제)"
+                }
+            } else {
+                // execute에서 거부된 경우
+                when (ResultContract.recoveryAction(result, context.packageName)) {
+                    ResultContract.RECOVERY_REQUEST_SELF_PERMISSION ->
+                        "내 런타임 권한 요청 필요: $perm"
+                    ResultContract.RECOVERY_REQUEST_PLUGIN_PERMISSION ->
+                        "플러그인($at)의 런타임 권한 획득 필요 — pluginPermissionIntent() 실행: $perm"
+                    else ->
+                        "$at 가 $perm 권한을 보유하지 않음 (배포 구성 문제)"
+                }
             }
         }
 
