@@ -19,13 +19,13 @@ public interface IToolHub extends IInterface {
     Bundle describe(String actionId) throws android.os.RemoteException;
 
     /**
-     * 사전 권한 진단 — A가 execute() 호출 전에 "지금 실행 가능한가?" 미리 확인.
+     * 권한 사전검사 — A가 execute() 호출 전에 "지금 실행 가능한가?" 미리 확인.
      * null 반환 = 실행 가능 (또는 정보 부족)
-     * denied Bundle 반환 = grant 또는 AppOps 문제 (PHASE_HUB_PREFLIGHT)
+     * denied Bundle 반환 = grant 또는 AppOps 문제 (PHASE_HUB_AUTHORIZATION_PRECHECK)
      * 결과는 B에서 ~10초 캐싱하므로 repeat 호출은 빠르다. execute()에서도
      * 동일 로직이 재실행되므로 보안 문제 없음 (캐시 사용으로 중복 방지).
      */
-    Bundle preflight(String actionId) throws android.os.RemoteException;
+    Bundle authorizationPreCheck(String actionId) throws android.os.RemoteException;
 
     abstract class Stub extends android.os.Binder implements IToolHub {
         public static IToolHub asInterface(android.os.IBinder obj) {
@@ -71,12 +71,12 @@ public interface IToolHub extends IInterface {
                     reply.writeNoException();
                     reply.writeBundle(metadata);
                     return true;
-                case 4: // preflight
+                case 4: // authorizationPreCheck
                     data.enforceInterface("com.example.toolhub.IToolHub");
-                    String preflightActionId = data.readString();
-                    Bundle preflightResult = preflight(preflightActionId);
+                    String authCheckActionId = data.readString();
+                    Bundle authCheckResult = authorizationPreCheck(authCheckActionId);
                     reply.writeNoException();
-                    reply.writeBundle(preflightResult);
+                    reply.writeBundle(authCheckResult);
                     return true;
             }
             return super.onTransact(code, data, reply, flags);
@@ -148,7 +148,7 @@ public interface IToolHub extends IInterface {
             }
 
             @Override
-            public Bundle preflight(String actionId) throws android.os.RemoteException {
+            public Bundle authorizationPreCheck(String actionId) throws android.os.RemoteException {
                 android.os.Parcel data = android.os.Parcel.obtain();
                 android.os.Parcel reply = android.os.Parcel.obtain();
                 try {

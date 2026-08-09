@@ -46,7 +46,7 @@ class ToolHubService : Service() {
 
     companion object {
         private const val TAG = "ToolHubService"
-        private const val PREFLIGHT_CACHE_TTL_MS = 10000L
+        private const val AUTHORIZATION_PRECHECK_CACHE_TTL_MS = 10000L
     }
 
     private lateinit var handlerThread: HandlerThread
@@ -65,12 +65,12 @@ class ToolHubService : Service() {
     private val metadataCache = ConcurrentHashMap<String, Bundle>()
 
     /**
-     * preflight 결과 캐시: actionId -> (timestamp, result Bundle).
-     * A의 repeated preflight() 호출을 빠르게 처리하고, execute() 호출 시
+     * 권한 사전검사 결과 캐시: actionId -> (timestamp, result Bundle).
+     * A의 repeated authorizationPreCheck() 호출을 빠르게 처리하고, execute() 호출 시
      * 동일 actionId는 캐시 결과로 재사용해 중복 검사를 방지한다.
-     * ~10초 TTL (PREFLIGHT_CACHE_TTL_MS).
+     * ~10초 TTL (AUTHORIZATION_PRECHECK_CACHE_TTL_MS).
      */
-    private val preflightCache = ConcurrentHashMap<String, Pair<Long, Bundle>>()
+    private val authorizationPreCheckCache = ConcurrentHashMap<String, Pair<Long, Bundle>>()
 
     override fun onCreate() {
         super.onCreate()
@@ -167,14 +167,14 @@ class ToolHubService : Service() {
         }
 
         /**
-         * 사전 권한 진단 — execute() 호출 전에 A가 선택적으로 호출.
+         * 권한 사전검사 — execute() 호출 전에 A가 선택적으로 호출.
          * 반환값: null 또는 success → 실행 가능
-         *        denied Bundle (PHASE_HUB_PREFLIGHT) → 권한/AppOps 문제
+         *        denied Bundle (PHASE_HUB_AUTHORIZATION_PRECHECK) → 권한/AppOps 문제
          * 결과는 ~10초 캐싱되므로 A의 repeated 호출은 매우 빠르다.
          * execute()에서도 동일 actionId는 캐시 재사용으로 중복 검사 방지.
          */
-        override fun preflight(actionId: String): Bundle {
-            val cached = getValidCachedPreflight(actionId)
+        override fun authorizationPreCheck(actionId: String): Bundle {
+            val cached = getValidCachedAuthorizationPreCheck(actionId)
             if (cached != null) {
                 return cached
             }
@@ -186,12 +186,12 @@ class ToolHubService : Service() {
                 return ResultContract.error("no plugin found for authority '$authority'")
             }
 
-            // B 자신의 속성소스로 preflight 실행 (chained = B만, A 아님)
-            val preflightDenial = preflight(authority, actionName, attributionSource)
-            val result = preflightDenial ?: ResultContract.success(Bundle())
+            // B 자신의 속성소스로 사전검사 실행 (chained = B만, A 아님)
+            val denial = checkAuthorizationPreConditions(authority, actionName, attributionSource)
+            val result = denial ?: ResultContract.success(Bundle())
 
             // 결과 캐싱
-            preflightCache[actionId] = System.currentTimeMillis() to result
+            authorizationPreCheckCache[actionId] = System.currentTimeMillis() to result
             return result
         }
     }
@@ -263,17 +263,17 @@ class ToolHubService : Service() {
             return
         }
 
-        // 캐시된 preflight 결과 확인 — execute() 호출 전 A가 preflight()를 했으면
+        // 캐시된 사전검사 결과 확인 — execute() 호출 전 A가 authorizationPreCheck()를 했으면
         // 여기서 재사용 (중복 검사 방지).
-        val cachedPreflight = getValidCachedPreflight(entry.actionId)
-        if (cachedPreflight != null && cachedPreflight.getString(ResultContract.KEY_STATUS) != ResultContract.STATUS_SUCCESS) {
-            requestRegistry.complete(entry.requestId, cachedPreflight)
+        val cachedAuthCheck = getValidCachedAuthorizationPreCheck(entry.actionId)
+        if (cachedAuthCheck != null && cachedAuthCheck.getString(ResultContract.KEY_STATUS) != ResultContract.STATUS_SUCCESS) {
+            requestRegistry.complete(entry.requestId, cachedAuthCheck)
             return
         }
 
-        val preflightDenial = preflight(authority, actionName, entry.chainedSource)
-        if (preflightDenial != null) {
-            requestRegistry.complete(entry.requestId, preflightDenial)
+        val denial = checkAuthorizationPreConditions(authority, actionName, entry.chainedSource)
+        if (denial != null) {
+            requestRegistry.complete(entry.requestId, denial)
             return
         }
 
@@ -282,16 +282,16 @@ class ToolHubService : Service() {
     }
 
     /**
-     * advisory preflight (DESIGN.md 6.2). 캐시된 메타데이터의 권한 목록으로:
+     * 권한 사전검사 조건 확인 (DESIGN.md 6.2). 캐시된 메타데이터의 권한 목록으로:
      *  1. 체인 각 링크(B 자신 + A)의 grant를 확인 — 거부될 호출이 C 프로세스를
      *     깨우는 콜드스타트 비용을 없앤다.
      *  2. A의 AppOps 상태를 확인 — "이번만 허용" 만료, MODE_IGNORED는 grant로는
      *     안 보이고 GET_APP_OPS_STATS(signature|privileged)를 가진 B만 볼 수 있다.
      *     C는 이 검사를 할 수 없다 (C의 grant 검사와 겹치지 않는 유일 가치).
      * 어디까지나 advisory — 메타데이터가 없거나 낡았으면 그냥 통과시키고 C의
-     * 재검증에 맡긴다. 거부는 PHASE_HUB_PREFLIGHT로 구분 보고한다.
+     * 재검증에 맡긴다. 거부는 PHASE_HUB_AUTHORIZATION_PRECHECK로 구분 보고한다.
      */
-    private fun preflight(authority: String, actionName: String, chained: AttributionSource): Bundle? {
+    private fun checkAuthorizationPreConditions(authority: String, actionName: String, chained: AttributionSource): Bundle? {
         val meta = actionsMetadataFor(authority)?.getBundle(actionName) ?: return null
         val entries = meta.getParcelableArrayList(
             ResultContract.KEY_PERMISSION_ENTRIES, Bundle::class.java
@@ -309,13 +309,13 @@ class ToolHubService : Service() {
                 val pkg = link.packageName ?: continue
                 if (packageManager.checkPermission(permission, pkg) != PackageManager.PERMISSION_GRANTED) {
                     return ResultContract.denied(
-                        permission, pkg, ResultContract.PHASE_HUB_PREFLIGHT,
-                        "grant missing (hub preflight)", permissionTypeOf(permission)
+                        permission, pkg, ResultContract.PHASE_HUB_AUTHORIZATION_PRECHECK,
+                        "grant missing (authorization pre-check)", permissionTypeOf(permission)
                     )
                 }
                 if (appOpsBlocked(permission, link.uid, pkg)) {
                     return ResultContract.denied(
-                        permission, pkg, ResultContract.PHASE_HUB_PREFLIGHT,
+                        permission, pkg, ResultContract.PHASE_HUB_AUTHORIZATION_PRECHECK,
                         "app-op not allowed (one-time grant expired or ignored)",
                         ResultContract.PERMISSION_TYPE_RUNTIME
                     )
@@ -377,10 +377,10 @@ class ToolHubService : Service() {
         }
     }
 
-    private fun getValidCachedPreflight(actionId: String): Bundle? {
-        val (timestamp, result) = preflightCache[actionId] ?: return null
-        if (System.currentTimeMillis() - timestamp > PREFLIGHT_CACHE_TTL_MS) {
-            preflightCache.remove(actionId)
+    private fun getValidCachedAuthorizationPreCheck(actionId: String): Bundle? {
+        val (timestamp, result) = authorizationPreCheckCache[actionId] ?: return null
+        if (System.currentTimeMillis() - timestamp > AUTHORIZATION_PRECHECK_CACHE_TTL_MS) {
+            authorizationPreCheckCache.remove(actionId)
             return null
         }
         return result

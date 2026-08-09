@@ -111,28 +111,28 @@ class AgentToolClient(private val context: Context) {
     }
 
     /**
-     * 사전 권한 진단 (DESIGN.md 7장, PREFLIGHT.md 참고). B가 AppOps 상태와
+     * 권한 사전검사 (DESIGN.md 7장, AUTHORIZATION_PRECHECK.md 참고). B가 AppOps 상태와
      * 권한 grant를 빠르게 판단 (C 안 깨움, ~10초 캐시).
      *
-     * 반환값: null 또는 success → OK / denied Bundle → 거부 (PHASE_HUB_PREFLIGHT)
+     * 반환값: null 또는 success → OK / denied Bundle → 거부 (PHASE_HUB_AUTHORIZATION_PRECHECK)
      *
      * A가 execute() 전에 호출해서 "지금 실행 가능한가?" 미리 판단 가능.
-     * 예: preflight()가 거부하면 권한 요청 후 execute() 재시도.
+     * 예: authorizationPreCheck()가 거부하면 권한 요청 후 execute() 재시도.
      */
-    fun preflight(actionId: String): Bundle? = try {
-        hub?.preflight(actionId)
+    fun authorizationPreCheck(actionId: String): Bundle? = try {
+        hub?.authorizationPreCheck(actionId)
     } catch (e: Exception) {
-        Log.e(TAG, "preflight failed", e)
+        Log.e(TAG, "authorizationPreCheck failed", e)
         null
     }
 
     /**
-     * preflight 결과가 통과했는가 (또는 정보 부족).
+     * 사전검사 결과가 통과했는가 (또는 정보 부족).
      * true면 execute() 호출 가능성 높음.
      */
-    fun preflightOk(preflightResult: Bundle?): Boolean {
-        if (preflightResult == null) return true  // 정보 부족, 통과로 봄
-        return preflightResult.getString(ResultContract.KEY_STATUS) == ResultContract.STATUS_SUCCESS
+    fun authorizationPreCheckOk(result: Bundle?): Boolean {
+        if (result == null) return true  // 정보 부족, 통과로 봄
+        return result.getString(ResultContract.KEY_STATUS) == ResultContract.STATUS_SUCCESS
     }
 
     /**
@@ -240,14 +240,14 @@ class AgentToolClient(private val context: Context) {
             val at = result.getString(ResultContract.KEY_DENIED_AT)
             val phase = result.getString(ResultContract.KEY_PHASE)
 
-            // preflight에서 거부된 경우 (PHASE_HUB_PREFLIGHT)
-            if (phase == ResultContract.PHASE_HUB_PREFLIGHT) {
+            // 사전검사에서 거부된 경우 (PHASE_HUB_AUTHORIZATION_PRECHECK)
+            if (phase == ResultContract.PHASE_HUB_AUTHORIZATION_PRECHECK) {
                 val permType = result.getString(ResultContract.KEY_PERMISSION_TYPE)
                 if (permType == ResultContract.PERMISSION_TYPE_RUNTIME) {
-                    "허브의 사전 진단: $at 의 $perm 권한 또는 AppOps 문제. " +
+                    "허브 사전검사: $at 의 $perm 권한 또는 AppOps 문제. " +
                         "권한 설정 확인 또는 재시도"
                 } else {
-                    "허브의 사전 진단: $at 이(가) $perm 권한을 보유하지 않음 (배포 문제)"
+                    "허브 사전검사: $at 이(가) $perm 권한을 보유하지 않음 (배포 문제)"
                 }
             } else {
                 // execute에서 거부된 경우

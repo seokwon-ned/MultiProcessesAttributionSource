@@ -1,10 +1,10 @@
-# Preflight 메커니즘: 사전 권한 진단
+# Authorization PreCheck 메커니즘: 권한 사전검사
 
 **목적**: A가 execute() 호출 전에 "지금 실행 가능한가?" 미리 빠르게 확인.
 
 ---
 
-## 🤔 왜 preflight이 필요한가?
+## 🤔 왜 authorizationPreCheck이 필요한가?
 
 ### 문제: execute() 호출의 비용
 
@@ -33,10 +33,10 @@
 - 불필요한 IPC 오버헤드
 - A가 대기해야 함 (비동기지만 콜백 처리 필요)
 
-### 해결: preflight으로 사전 진단
+### 해결: authorizationPreCheck으로 사전 검사
 
 ```
-1️⃣ A: preflight() 호출 (선택)
+1️⃣ A: authorizationPreCheck() 호출 (선택)
    ↓
 2️⃣ B: 캐시 또는 빠른 체크 (AppOps 확인)
    ↓
@@ -57,25 +57,25 @@
 
 ---
 
-## 📊 preflight() 호출 Flow
+## 📊 authorizationPreCheck() 호출 Flow
 
-### 첫 번째 preflight() 호출 (캐시 미스)
+### 첫 번째 authorizationPreCheck() 호출 (캐시 미스)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ A: preflight("com.plugin/send_sms")                        │
+│ A: authorizationPreCheck("com.plugin/send_sms")            │
 │    (IToolHub.Stub.Proxy → B의 binder로 transact)            │
 └─────────────────────────────────────────────────────────────┘
          ↓ (Parcel 마샬링)
 
 ┌─────────────────────────────────────────────────────────────┐
 │ B: ToolHubService.onTransact(code=4, ...)                   │
-│    → preflight("com.plugin/send_sms") 호출                   │
+│    → authorizationPreCheck("com.plugin/send_sms") 호출       │
 └─────────────────────────────────────────────────────────────┘
          ↓
 
 ┌─────────────────────────────────────────────────────────────┐
-│ B: getValidCachedPreflight("com.plugin/send_sms")           │
+│ B: getValidCachedAuthorizationPreCheck("com.plugin/send_sms")│
 │    → null (TTL 만료 또는 처음)                              │
 └─────────────────────────────────────────────────────────────┘
          ↓
@@ -87,7 +87,7 @@
          ↓
 
 ┌─────────────────────────────────────────────────────────────┐
-│ B: private fun preflight(                                   │
+│ B: private fun checkAuthorizationPreConditions(             │
 │     "com.plugin", "send_sms", B의 attributionSource)        │
 │                                                              │
 │ 체인 구성: [B] (A는 없음 — A의 소스가 없기 때문)             │
@@ -130,15 +130,15 @@
 │    → MODE_IGNORED? ❌ (거부)                                 │
 │                                                              │
 │ 반환: denied("READ_CONTACTS", B.pkg,                        │
-│       PHASE_HUB_PREFLIGHT,                                 │
+│       PHASE_HUB_AUTHORIZATION_PRECHECK,                     │
 │       "app-op not allowed (one-time grant expired...)",    │
 │       PERMISSION_TYPE_RUNTIME)                             │
 └─────────────────────────────────────────────────────────────┘
          ↓
 
 ┌─────────────────────────────────────────────────────────────┐
-│ B: 결과를 preflightCache에 저장 (10초 TTL)                   │
-│    preflightCache["com.plugin/send_sms"] =                  │
+│ B: 결과를 authorizationPreCheckCache에 저장 (10초 TTL)       │
+│    authorizationPreCheckCache["com.plugin/send_sms"] =      │
 │      (timestamp, denied_bundle)                             │
 └─────────────────────────────────────────────────────────────┘
          ↓ (Parcel 언마샬링)
@@ -147,7 +147,7 @@
 │ A: 응답 받음                                                  │
 │ {                                                            │
 │   "status": "denied",                                       │
-│   "phase": "hub_preflight",                                │
+│   "phase": "hub_authorization_precheck",                   │
 │   "permission": "READ_CONTACTS",                            │
 │   "denied_at": "com.example.toolhub",                       │
 │   "perm_type": "runtime"                                    │
@@ -157,17 +157,17 @@
 
 ---
 
-### 두 번째 preflight() 호출 (캐시 히트)
+### 두 번째 authorizationPreCheck() 호출 (캐시 히트)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ A: preflight("com.plugin/send_sms")                        │
+│ A: authorizationPreCheck("com.plugin/send_sms")            │
 │    (A가 다시 호출, 또는 다른 처리 후)                         │
 └─────────────────────────────────────────────────────────────┘
          ↓
 
 ┌─────────────────────────────────────────────────────────────┐
-│ B: getValidCachedPreflight("com.plugin/send_sms")           │
+│ B: getValidCachedAuthorizationPreCheck("com.plugin/send_sms")│
 │    → (timestamp, denied_bundle)                             │
 │    TTL 확인: 현재시간 - timestamp < 10초 ✓                   │
 │    → 즉시 반환 (C 안 깸! ⚡)                                 │
@@ -189,10 +189,10 @@
 
 ## 🔄 execute() 호출 시 캐시 재사용
 
-### A가 preflight() 한 뒤 execute() 호출
+### A가 authorizationPreCheck() 한 뒤 execute() 호출
 
 ```
-1️⃣ A: preflight() → denied(READ_CONTACTS, PHASE_HUB_PREFLIGHT)
+1️⃣ A: authorizationPreCheck() → denied(READ_CONTACTS, PHASE_HUB_AUTHORIZATION_PRECHECK)
    ↓
 2️⃣ A: PluginPermissionActivity 실행 → 사용자 승인
    ↓
@@ -200,10 +200,10 @@
    ↓
 4️⃣ B: dispatch()
    │
-   ├─ cachedPreflight = getValidCachedPreflight("com.plugin/send_sms")
+   ├─ cachedAuthCheck = getValidCachedAuthorizationPreCheck("com.plugin/send_sms")
    │  → null (TTL 만료 됨? 또는 상태 변경?)
    │
-   └─ preflight(authority, actionName, entry.chainedSource)
+   └─ checkAuthorizationPreConditions(authority, actionName, entry.chainedSource)
       ├─ 체인 = [B, A] (A의 소스 포함)
       ├─ 검사: A의 READ_CONTACTS 확인 → ✓ (방금 승인)
       └─ 통과 → C 호출
@@ -214,15 +214,15 @@
 ```
 
 **구조:**
-- 3️⃣ execute()의 cachedPreflight는 **A 없는 상태 (B만)**를 저장했으므로, 당신의 A의 권한 변경은 반영되지 않음
-- 따라서 execute()에서는 **다시 preflight 실행** (하지만 캐시 미사용, 이유: A의 상태 변경)
+- 3️⃣ execute()의 cachedAuthCheck는 **A 없는 상태 (B만)**를 저장했으므로, A의 권한 변경은 반영되지 않음
+- 따라서 execute()에서는 **다시 검사 실행** (하지만 캐시 미사용, 이유: A의 상태 변경)
 - C에서 **최종 권한/동의 검증** 후 실행
 
 ---
 
-## 📋 preflight()의 역할과 제한
+## 📋 authorizationPreCheck()의 역할과 제한
 
-### preflight()가 검사하는 것
+### authorizationPreCheck()가 검사하는 것
 
 | 항목 | 검사 대상 | 방법 |
 |------|---------|------|
@@ -230,11 +230,11 @@
 | **B의 AppOps** | "이번만 허용" 만료, MODE_IGNORED | AppOpsManager (GET_APP_OPS_STATS) |
 | **메타데이터** | 플러그인의 필요 권한 | B의 metadataCache (캐시됨) |
 
-### preflight()가 검사 못하는 것
+### authorizationPreCheck()가 검사 못하는 것
 
 | 항목 | 이유 |
 |------|------|
-| **A의 grant** | A의 AttributionSource가 없음 (preflight는 actionId만 받음) |
+| **A의 grant** | A의 AttributionSource가 없음 (authorizationPreCheck는 actionId만 받음) |
 | **A의 AppOps** | A의 uid를 모름 |
 | **C의 권한** | C를 호출하지 않음 (그게 목표) |
 | **사용자 동의** | C의 ConsentStore 접근 불가 |
@@ -243,7 +243,7 @@
 
 ## 🎯 A의 사용 패턴
 
-### 패턴 1: preflight 미사용 (간단)
+### 패턴 1: authorizationPreCheck 미사용 (간단)
 
 ```kotlin
 // AgentToolClient.kt
@@ -263,27 +263,27 @@ fun executeAction(actionId: String, args: Bundle) {
 
 ---
 
-### 패턴 2: preflight 사용 (최적화)
+### 패턴 2: authorizationPreCheck 사용 (최적화)
 
 ```kotlin
 // AgentToolClient.kt
 fun executeAction(actionId: String, args: Bundle) {
-    // 1️⃣ 사전 진단 (선택)
-    val preflightResult = toolHub.preflight(actionId)
-    if (preflightResult.isDenied()) {
-        val permType = preflightResult.getPermissionType()
+    // 1️⃣ 사전 검사 (선택)
+    val checkResult = toolHub.authorizationPreCheck(actionId)
+    if (!toolClient.authorizationPreCheckOk(checkResult)) {
+        val permType = checkResult.getPermissionType()
         if (permType == PERMISSION_TYPE_RUNTIME) {
             // B에서 감지한 AppOps 또는 A의 권한 부족
             // → A가 권한 요청하거나, 기타 처리
-            return handleDenial(preflightResult)
+            return handleDenial(checkResult)
         }
     }
     
-    // 2️⃣ describe로 권한 정보 확인 (B의 preflight과 별개)
+    // 2️⃣ describe로 권한 정보 확인 (B의 검사와 별개)
     val describe = toolHub.describe(actionId)
     val requiredPerms = describe.getPermissions()
     
-    // 3️⃣ A 자신의 권한 확인 (B의 preflight은 B만 검사했으므로)
+    // 3️⃣ A 자신의 권한 확인 (B의 검사는 B만 검사했으므로)
     val missing = requiredPerms.filter {
         checkSelfPermission(it) != PERMISSION_GRANTED
     }
@@ -299,48 +299,48 @@ fun executeAction(actionId: String, args: Bundle) {
 ```
 
 **장점:**
-- ✅ B의 preflight에서 AppOps 문제 조기 감지
+- ✅ B의 검사에서 AppOps 문제 조기 감지
 - ✅ 불필요한 C 호출 줄임
 - ✅ 캐싱으로 빠른 응답
 
 **단점:**
-- ❌ API 호출 증가 (preflight + describe + execute)
+- ❌ API 호출 증가 (authorizationPreCheck + describe + execute)
 - ❌ 코드 복잡도 증가
 
 ---
 
-## 🔐 보안: preflight은 "advisory"일 뿐
+## 🔐 보안: authorizationPreCheck은 "advisory"일 뿐
 
 ```
-preflight()의 거부 판정:
+authorizationPreCheck()의 거부 판정:
   → "이 경로로 execute() 거부될 가능성이 높다"
   → 보안 판정이 아님
 
 execute()의 검증 (C의 Layer 0/2/3):
   → 최종 보안 판정
-  → preflight 결과를 무시하고 재검증
+  → authorizationPreCheck 결과를 무시하고 재검증
 ```
 
 **따라서:**
-- preflight이 통과해도 execute()가 거부될 수 있음 (권한 변경 등)
-- preflight이 거부해도 execute()가 성공할 수 있음 (매우 드묾, 캐시 오래됨)
+- authorizationPreCheck이 통과해도 execute()가 거부될 수 있음 (권한 변경 등)
+- authorizationPreCheck이 거부해도 execute()가 성공할 수 있음 (매우 드묾, 캐시 오래됨)
 - C의 Layer 0/2/3가 **최종 안전망**
 
 ---
 
 ## 📈 캐싱 메커니즘
 
-### preflight 결과 캐싱 (TTL: 10초)
+### authorizationPreCheck 결과 캐싱 (TTL: 10초)
 
 ```kotlin
-private val preflightCache = ConcurrentHashMap<String, Pair<Long, Bundle>>()
-//                                                      ↑            ↑
-//                                            timestamp    결과 Bundle
+private val authorizationPreCheckCache = ConcurrentHashMap<String, Pair<Long, Bundle>>()
+//                                                               ↑            ↑
+//                                                   timestamp    결과 Bundle
 
-private fun getValidCachedPreflight(actionId: String): Bundle? {
-    val (timestamp, result) = preflightCache[actionId] ?: return null
-    if (System.currentTimeMillis() - timestamp > PREFLIGHT_CACHE_TTL_MS) {
-        preflightCache.remove(actionId)
+private fun getValidCachedAuthorizationPreCheck(actionId: String): Bundle? {
+    val (timestamp, result) = authorizationPreCheckCache[actionId] ?: return null
+    if (System.currentTimeMillis() - timestamp > AUTHORIZATION_PRECHECK_CACHE_TTL_MS) {
+        authorizationPreCheckCache.remove(actionId)
         return null
     }
     return result
@@ -350,22 +350,22 @@ private fun getValidCachedPreflight(actionId: String): Bundle? {
 ### 캐시 생명주기
 
 ```
-T0: A: preflight() → B가 검사 → 캐시 저장
-    preflightCache["action1"] = (T0, denied_bundle)
+T0: A: authorizationPreCheck() → B가 검사 → 캐시 저장
+    authorizationPreCheckCache["action1"] = (T0, denied_bundle)
 
-T1~T9: A: preflight() 다시 호출 → 캐시 히트 (재사용) ⚡
+T1~T9: A: authorizationPreCheck() 다시 호출 → 캐시 히트 (재사용) ⚡
 
-T10: A: preflight() 호출 → TTL 만료 (제거)
+T10: A: authorizationPreCheck() 호출 → TTL 만료 (제거)
     → 다시 검사 실행
 
 T11: B: execute() 호출 (다른 요청)
-    → dispatch()에서 cachedPreflight 확인
-    → TTL 만료 상태면 캐시 미사용 → 새로 preflight 실행
+    → dispatch()에서 cachedAuthCheck 확인
+    → TTL 만료 상태면 캐시 미사용 → 새로 검사 실행
 ```
 
 ### 캐시의 목적
 
-1. **preflight 호출 시**: A의 repeated 호출 최적화
+1. **authorizationPreCheck 호출 시**: A의 repeated 호출 최적화
 2. **execute 호출 시**: B가 중복 검사 회피 (성능)
 
 ---
@@ -374,7 +374,7 @@ T11: B: execute() 호출 (다른 요청)
 
 | 항목 | 설명 |
 |------|------|
-| **preflight()** | A가 execute() 전에 B의 상태만 빠르게 진단 |
+| **authorizationPreCheck()** | A가 execute() 전에 B의 상태만 빠르게 진단 |
 | **대상** | B의 grant + AppOps 확인 (A는 별도) |
 | **결과** | null 또는 success = OK / denied Bundle = 거부 |
 | **캐싱** | 10초 TTL (repeated 호출 최적화) |
@@ -387,4 +387,4 @@ T11: B: execute() 호출 (다른 요청)
 
 - **DESIGN.md**: 전체 T∧P∧U∧V 인가 파이프라인
 - **LAYERS.md**: Layer 0/2/3 상세 설명
-- **ToolHubService.kt**: 구현 코드 (dispatch, preflight)
+- **ToolHubService.kt**: 구현 코드 (dispatch, checkAuthorizationPreConditions)

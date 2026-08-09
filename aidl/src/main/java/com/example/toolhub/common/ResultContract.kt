@@ -67,7 +67,7 @@ object ResultContract {
 
     // phase 값 — A의 대응이 갈리는 지점이므로 반드시 구분해서 채운다.
     const val PHASE_CHAIN = "chain"            // 코드 버그. 권한 요청해도 소용없음
-    const val PHASE_HUB_PREFLIGHT = "hub_preflight"      // B의 advisory 사전 검사 (grant/AppOps)
+    const val PHASE_HUB_AUTHORIZATION_PRECHECK = "hub_authorization_precheck"      // B의 advisory 사전 검사 (grant/AppOps)
     const val PHASE_PLUGIN_PREFLIGHT = "plugin_preflight"
     const val PHASE_RUNTIME = "runtime"        // AppOps 계열. 실행 중 발생
 
